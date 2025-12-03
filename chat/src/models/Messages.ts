@@ -5,8 +5,7 @@ export interface IMessage extends Document{
     sender: string;
     text?: string;
     image?: {
-    url: string;
-    publicId: string;
+    key: string;
   };
   messageType: "text" | "image";
   seen: boolean;
@@ -15,13 +14,19 @@ export interface IMessage extends Document{
   updatedAt: Date;
 }
 
+export interface IMessageWithUrl extends IMessage {
+  image?: {
+    key: string;
+    url: string;
+  };
+}
+
 const schema:Schema<IMessage> = new Schema({
     chatId: {type: Schema.Types.ObjectId, required: true},
     sender: {type: String, required: true},
     text: {type: String},
     image: {
-        url: {type: String},
-        publicId: {type: String}
+        key: {type: String}
     },
     messageType: {
       type: String,

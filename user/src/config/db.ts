@@ -9,7 +9,7 @@ const connectDB = async () =>{
     }
     try {
         await mongoose.connect(url, {
-            dbName: "hellochat"
+            dbName: `${process.env.DB_NAME}`
         });
         console.log("Database connected");
     } catch (error) {

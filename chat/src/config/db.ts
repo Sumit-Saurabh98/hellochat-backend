@@ -4,12 +4,13 @@ import mongoose from "mongoose";
 
 const connectDB = async () =>{
     const url = process.env.MONGO_URI;
+    const DBName = process.env.DB_NAME;
     if(!url){
         throw new Error("MONGO_URI not found");
     }
     try {
         await mongoose.connect(url, {
-            dbName: "hellochat"
+            dbName: `${DBName}`
         });
         console.log("Database connected");
     } catch (error) {

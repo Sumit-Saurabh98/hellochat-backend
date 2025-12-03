@@ -4,7 +4,9 @@ import axios from "axios";
 import { type Response } from "express";
 import Chat from "../models/Chat.js";
 import Messages from "../models/Messages.js";
+import type { IMessageWithUrl } from "../models/Messages.js";
 import { getReceiverSocketId, io } from "../config/socket.js";
+import { generateSingleUploadPresignedUrl, initiateMultipartUpload, generatePartPresignedUrl, completeMultipartUpload, generateViewPresignedUrl } from "../config/aws-s3.js";
 
 export const createNewChat = TryCatch(
   async (req: AuthenticatedRequest, res: Response) => {
@@ -38,6 +40,117 @@ export const createNewChat = TryCatch(
     res.status(201).json({
       message: "Chat created",
       chatId: newChat._id,
+    });
+  }
+);
+
+// Get presigned view URL for image
+export const getImageViewUrl = TryCatch(
+  async (req: AuthenticatedRequest, res: Response) => {
+    const { key } = req.query;
+
+    if (!key || typeof key !== "string") {
+      res.status(400).json({
+        message: "key is required",
+      });
+      return;
+    }
+
+    const url = await generateViewPresignedUrl(key);
+
+    res.status(200).json({
+      url,
+    });
+  }
+);
+
+// AWS S3 Upload Controllers
+export const getSingleUploadPresignedUrl = TryCatch(
+  async (req: AuthenticatedRequest, res: Response) => {
+    const { fileName, contentType } = req.body;
+
+    if (!fileName || !contentType) {
+      res.status(400).json({
+        message: "fileName and contentType are required",
+      });
+      return;
+    }
+
+    // Validate contentType for images
+    if (!contentType.startsWith("image/")) {
+      res.status(400).json({
+        message: "Only image files are allowed",
+      });
+      return;
+    }
+
+    const { uploadUrl, key } = await generateSingleUploadPresignedUrl(fileName, contentType);
+
+    res.status(200).json({
+      uploadUrl,
+      key,
+    });
+  }
+);
+
+export const initiateMultipartUploadUrl = TryCatch(
+  async (req: AuthenticatedRequest, res: Response) => {
+    const { fileName, contentType, totalParts } = req.body;
+
+    if (!fileName || !contentType || !totalParts) {
+      res.status(400).json({
+        message: "fileName, contentType, and totalParts are required",
+      });
+      return;
+    }
+
+    if (!contentType.startsWith("image/")) {
+      res.status(400).json({
+        message: "Only image files are allowed",
+      });
+      return;
+    }
+
+    if (totalParts < 1 || totalParts > 10000) { // AWS limit
+      res.status(400).json({
+        message: "totalParts must be between 1 and 10000",
+      });
+      return;
+    }
+
+    const { uploadId, key } = await initiateMultipartUpload(fileName, contentType);
+
+    // Generate presigned URLs for all parts
+    const partUrls = [];
+    for (let i = 1; i <= totalParts; i++) {
+      const { uploadUrl, partNumber } = await generatePartPresignedUrl(key, uploadId, i);
+      partUrls.push({ uploadUrl, partNumber });
+    }
+
+    res.status(200).json({
+      uploadId,
+      key,
+      parts: partUrls,
+    });
+  }
+);
+
+export const completeMultipartUploadHandler = TryCatch(
+  async (req: AuthenticatedRequest, res: Response) => {
+    const { key, uploadId, parts } = req.body;
+
+    if (!key || !uploadId || !parts) {
+      res.status(400).json({
+        message: "key, uploadId, and parts are required",
+      });
+      return;
+    }
+
+    await completeMultipartUpload(key, uploadId, parts);
+
+    res.status(200).json({
+      message: "Upload completed successfully",
+      key,
     });
   }
 );
@@ -98,8 +211,7 @@ export const getAllChats = TryCatch(async (req: AuthenticatedRequest, res) => {
 export const sendMessage = TryCatch(
   async (req: AuthenticatedRequest, res: Response) => {
     const senderId = req.user?._id;
-    const { chatId, text } = req.body;
-    const imageFile = req.file;
+    const { chatId, text, imageKey } = req.body;
 
     if (!senderId || !chatId) {
       res.status(400).json({
@@ -108,7 +220,7 @@ export const sendMessage = TryCatch(
       return;
     }
 
-    if (!text && !imageFile) {
+    if (!text && !imageKey) {
       res.status(400).json({
         message: "Please provide text or image",
       });
@@ -167,10 +279,9 @@ export const sendMessage = TryCatch(
       seenAt: isReceiverInChatRoom ? new Date() : undefined,
     };
 
-    if (imageFile) {
+    if (imageKey) {
       messageData.image = {
-        url: imageFile.path,
-        publicId: imageFile.filename,
+        key: imageKey,
       };
       messageData.messageType = "image";
       messageData.text = text || "";
@@ -183,7 +294,7 @@ export const sendMessage = TryCatch(
 
     const savedMessage = await message.save();
 
-    const latestMessageText = imageFile ? "📷 Image" : text;
+    const latestMessageText = imageKey ? "📷 Image" : text;
 
     await Chat.findByIdAndUpdate(
       chatId,
@@ -283,7 +394,16 @@ export const getMessagesByChat = TryCatch(
       }
     );
 
-    const messages = await Messages.find({ chatId }).sort({ createdAt: 1 });
+    const messagesRaw = await Messages.find({ chatId }).sort({ createdAt: 1 });
+
+    // Generate presigned URLs for images
+    const messages = await Promise.all(messagesRaw.map(async (msg) => {
+      const msgObj = msg.toObject() as unknown as IMessageWithUrl;
+      if (msgObj.messageType === "image" && msgObj.image?.key) {
+        msgObj.image.url = await generateViewPresignedUrl(msgObj.image.key);
+      }
+      return msgObj;
+    }));
 
     const otherUserId = chat.users.find((id) => id !== userId);
 
