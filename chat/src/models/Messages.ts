@@ -7,7 +7,14 @@ export interface IMessage extends Document{
     image?: {
     key: string;
   };
-  messageType: "text" | "image";
+    file?: {
+      key: string;
+      filename: string;
+      fileType: string;
+      fileSize: number;
+    };
+  messageType: "text" | "image" | "video" | "file";
+  uploadStatus?: "pending" | "uploading" | "completed" | "failed";
   seen: boolean;
   seenAt?: Date;
   createdAt: Date;
@@ -28,10 +35,21 @@ const schema:Schema<IMessage> = new Schema({
     image: {
         key: {type: String}
     },
+    file: {
+      key: {type: String},
+      filename: {type: String},
+      fileType: {type: String},
+      fileSize: {type: Number},
+    },
     messageType: {
       type: String,
-      enum: ["text", "image"],
+      enum: ["text", "image", "video", "file"],
       default: "text",
+    },
+    uploadStatus: {
+      type: String,
+      enum: ["pending", "uploading", "completed", "failed"],
+      default: null,
     },
     seen: {
       type: Boolean,

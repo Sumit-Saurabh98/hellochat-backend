@@ -4,10 +4,16 @@ import cors from "cors";
 import connectDB from "./config/db.js";
 import chatRoutes from "./routes/chat.js";
 import { app, server } from "./config/socket.js";
+import { smartQueue } from "./config/queue.js";
 
 dotenv.config();
 
 connectDB();
+
+// Export smartQueue for use by chat controller
+export { smartQueue };
+
+import("./config/queue.js"); // Initialize queue connection
 
 app.use(cors());
 

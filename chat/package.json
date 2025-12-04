@@ -10,28 +10,32 @@
     "test": "echo \"Error: no test specified\" && exit 1",
     "build": "tsc",
     "start": "node dist/index.js",
-    "dev": "concurrently \"tsc -w\" \"nodemon dist/index.js\""
+    "consumer": "node dist/consumer.js",
+    "dev": "concurrently \"tsc -w\" \"nodemon dist/index.js\"",
+    "dev:consumer": "nodemon dist/consumer.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.943.0",
     "@aws-sdk/s3-request-presigner": "^3.943.0",
+    "amqplib": "^0.10.9",
     "axios": "^1.11.0",
     "cors": "^2.8.5",
     "dotenv": "^17.2.1",
     "express": "^5.1.0",
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^8.17.1",
+    "redis": "^5.10.0",
     "socket.io": "^4.8.1",
     "uuid": "^13.0.0"
   },
   "devDependencies": {
+    "@types/amqplib": "^0.10.8",
     "@types/axios": "^0.9.36",
     "@types/cors": "^2.8.19",
     "@types/dotenv": "^6.1.1",
     "@types/express": "^5.0.3",
     "@types/jsonwebtoken": "^9.0.10",
     "@types/mongoose": "^5.11.96",
-
     "@types/socket.io": "^3.0.1",
     "concurrently": "^9.2.0",
     "nodemon": "^3.1.10"

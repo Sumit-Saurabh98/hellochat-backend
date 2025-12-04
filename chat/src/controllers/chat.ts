@@ -4,9 +4,11 @@ import axios from "axios";
 import { type Response } from "express";
 import Chat from "../models/Chat.js";
 import Messages from "../models/Messages.js";
+import type { IMessage } from "../models/Messages.js";
 import type { IMessageWithUrl } from "../models/Messages.js";
 import { getReceiverSocketId, io } from "../config/socket.js";
 import { generateSingleUploadPresignedUrl, initiateMultipartUpload, generatePartPresignedUrl, completeMultipartUpload, generateViewPresignedUrl } from "../config/aws-s3.js";
+
 
 export const createNewChat = TryCatch(
   async (req: AuthenticatedRequest, res: Response) => {
@@ -76,10 +78,11 @@ export const getSingleUploadPresignedUrl = TryCatch(
       return;
     }
 
-    // Validate contentType for images
-    if (!contentType.startsWith("image/")) {
+    // Validate contentType
+    const allowedStarts = ["image/", "video/", "application/", "text/", "audio/"];
+    if (!allowedStarts.some(start => contentType.startsWith(start))) {
       res.status(400).json({
-        message: "Only image files are allowed",
+        message: "Invalid file type",
       });
       return;
     }
@@ -104,9 +107,11 @@ export const initiateMultipartUploadUrl = TryCatch(
       return;
     }
 
-    if (!contentType.startsWith("image/")) {
+    // Validate contentType
+    const allowedStarts = ["image/", "video/", "application/", "text/", "audio/"];
+    if (!allowedStarts.some(start => contentType.startsWith(start))) {
       res.status(400).json({
-        message: "Only image files are allowed",
+        message: "Invalid file type",
       });
       return;
     }
@@ -211,7 +216,7 @@ export const getAllChats = TryCatch(async (req: AuthenticatedRequest, res) => {
 export const sendMessage = TryCatch(
   async (req: AuthenticatedRequest, res: Response) => {
     const senderId = req.user?._id;
-    const { chatId, text, imageKey } = req.body;
+    const { chatId, text, mediaType, mediaKey, mediaInfo } = req.body;
 
     if (!senderId || !chatId) {
       res.status(400).json({
@@ -220,9 +225,9 @@ export const sendMessage = TryCatch(
       return;
     }
 
-    if (!text && !imageKey) {
+    if (!text && !mediaKey && !mediaType) {
       res.status(400).json({
-        message: "Please provide text or image",
+        message: "Please provide text or media",
       });
       return;
     }
@@ -277,16 +282,33 @@ export const sendMessage = TryCatch(
       sender: senderId,
       seen: isReceiverInChatRoom,
       seenAt: isReceiverInChatRoom ? new Date() : undefined,
+      text: text || "",
     };
 
-    if (imageKey) {
-      messageData.image = {
-        key: imageKey,
-      };
-      messageData.messageType = "image";
-      messageData.text = text || "";
+    if (mediaType) {
+      messageData.uploadStatus = "uploading";
+      messageData.messageType = mediaType === 'file' ? 'file' : (mediaType === 'video' ? 'video' : 'image');
+
+      if (mediaType === 'image') {
+        // For images, store key if already uploaded, else prepare for upload
+        if (mediaKey) {
+          messageData.image = { key: mediaKey };
+          messageData.uploadStatus = "completed";
+        }
+      } else {
+        if (mediaInfo) {
+          messageData.file = {
+            filename: mediaInfo.filename,
+            fileType: mediaInfo.fileType,
+            fileSize: mediaInfo.fileSize,
+          };
+          if (mediaKey) {
+            messageData.file.key = mediaKey;
+            messageData.uploadStatus = "completed";
+          }
+        }
+      }
     } else {
-      messageData.text = text;
       messageData.messageType = "text";
     }
 
@@ -294,7 +316,12 @@ export const sendMessage = TryCatch(
 
     const savedMessage = await message.save();
 
-    const latestMessageText = imageKey ? "📷 Image" : text;
+    const latestMessageText = mediaType ? (
+      mediaType === 'image' ? "📷 Image" :
+      mediaType === 'video' ? "🎥 Video" :
+      mediaType === 'file' ? "📄 File" :
+      text
+    ) : text;
 
     await Chat.findByIdAndUpdate(
       chatId,
@@ -333,6 +360,182 @@ export const sendMessage = TryCatch(
     res.status(201).json({
       message: savedMessage,
       sender: senderId,
+    });
+  }
+);
+
+export const updateMessageMedia = TryCatch(
+  async (req: AuthenticatedRequest, res: Response) => {
+    const userId = req.user?._id;
+    const { messageId, mediaKey } = req.body;
+
+    if (!userId || !messageId || !mediaKey) {
+      res.status(400).json({
+        message: "UserId, messageId, and mediaKey are required",
+      });
+      return;
+    }
+
+    const message = await Messages.findOne({ _id: messageId, sender: userId });
+
+    if (!message) {
+      res.status(404).json({
+        message: "Message not found or not owned by user",
+      });
+      return;
+    }
+
+    // Update message with the uploaded key
+    if (message.messageType === "image") {
+      message.image = { key: mediaKey };
+    } else if (message.file) {
+      message.file.key = mediaKey;
+    }
+
+    message.uploadStatus = "completed";
+    await message.save();
+
+    // Emit update via socket to update UI in real-time
+    const chat = await Chat.findById(message.chatId);
+    if (chat) {
+      io.to(message.chatId.toString()).emit("messageUpdated", {
+        messageId,
+        message: message.toObject(),
+      });
+    }
+
+    res.status(200).json({
+      message: "Message updated successfully",
+    });
+  }
+);
+
+export const queueMessageForProcessing = TryCatch(
+  async (req: AuthenticatedRequest, res: Response) => {
+    const userId = req.user?._id;
+    const { chatId, text, mediaType, mediaInfo } = req.body;
+
+    if (!userId || !chatId) {
+      res.status(400).json({ message: "UserId and chatId are required" });
+      return;
+    }
+
+    if (!text && !mediaType) {
+      res.status(400).json({ message: "Text or mediaType is required" });
+      return;
+    }
+
+    // Basic validation
+    const chat = await Chat.findById(chatId);
+    if (!chat) {
+      res.status(404).json({ message: "Chat not found" });
+      return;
+    }
+
+    if (!chat.users.includes(userId)) {
+      res.status(403).json({ message: "Not authorized for this chat" });
+      return;
+    }
+
+    // Find the other user for socket notifications
+    const otherUserId = chat.users.find((user: any) => user.toString() !== userId.toString());
+
+    const receiverSocketId = getReceiverSocketId(otherUserId ? otherUserId.toString() : '');
+
+    let isReceiverInChatRoom = false;
+
+    if (receiverSocketId) {
+      const receiverSocket = io.sockets.sockets.get(receiverSocketId);
+
+      if (receiverSocket && receiverSocket.rooms.has(chatId)) {
+        isReceiverInChatRoom = true;
+      }
+    }
+
+    // Create message data
+    let dbMessageData: any = {
+      chatId: chatId,
+      sender: userId,
+      seen: isReceiverInChatRoom,
+      seenAt: isReceiverInChatRoom ? new Date() : undefined,
+      text: text || "",
+    };
+
+    if (mediaType) {
+      dbMessageData.uploadStatus = "uploading";
+      dbMessageData.messageType = mediaType === 'file' ? 'file' : (mediaType === 'video' ? 'video' : 'image');
+
+      if (mediaType === 'image') {
+        // Prepare for image upload
+        dbMessageData.image = { key: '' };
+      } else {
+        if (mediaInfo) {
+          dbMessageData.file = {
+            filename: mediaInfo.filename,
+            fileType: mediaInfo.fileType,
+            fileSize: mediaInfo.fileSize,
+            key: '',
+          };
+        }
+      }
+    } else {
+      dbMessageData.messageType = "text";
+    }
+
+    // Save message to database immediately
+    const savedMessage = await Messages.create(dbMessageData) as any;
+
+    // Update chat's latest message
+    const latestMessageText = mediaType ?
+      (mediaType === 'image' ? "📷 Image" :
+       mediaType === 'video' ? "🎥 Video" :
+       mediaType === 'file' ? "📄 File" : text)
+      : text;
+
+    await Chat.findByIdAndUpdate(chatId, {
+      latestMessage: { text: latestMessageText, sender: userId },
+      updatedAt: new Date(),
+    });
+
+    // Queue the message for socket notifications (not saving to DB again)
+    const messagePayload = {
+      clientMessageId: savedMessage._id.toString(), // Use actual message ID as client ID
+      chatId,
+      sender: userId,
+      text,
+      mediaType,
+      mediaInfo,
+      tempMessageId: savedMessage._id.toString(), // Track the already created message
+    };
+
+    // Import and use the smart queue function
+    import('../index.js').then(async (indexModule) => {
+      try {
+        const smartQueue = indexModule.smartQueue;
+        await smartQueue(messagePayload);
+        console.log('Message queued successfully for notifications:', messagePayload.clientMessageId);
+
+        res.status(200).json({
+          message: savedMessage,
+          clientMessageId: messagePayload.clientMessageId,
+          sender: userId,
+        });
+      } catch (error) {
+        console.error('Failed to queue message:', error);
+        // Message is already saved, just return it
+        res.status(200).json({
+          message: savedMessage,
+          clientMessageId: savedMessage._id.toString(),
+          sender: userId,
+        });
+      }
+    }).catch((importError) => {
+      console.error('Import error:', importError);
+      res.status(200).json({
+        message: savedMessage,
+        clientMessageId: savedMessage._id.toString(),
+        sender: userId,
+      });
     });
   }
 );
@@ -396,11 +599,13 @@ export const getMessagesByChat = TryCatch(
 
     const messagesRaw = await Messages.find({ chatId }).sort({ createdAt: 1 });
 
-    // Generate presigned URLs for images
+    // Generate presigned URLs for images and files
     const messages = await Promise.all(messagesRaw.map(async (msg) => {
-      const msgObj = msg.toObject() as unknown as IMessageWithUrl;
+      const msgObj = msg.toObject() as unknown as IMessageWithUrl & { file: { key: string, url?: string } };
       if (msgObj.messageType === "image" && msgObj.image?.key) {
         msgObj.image.url = await generateViewPresignedUrl(msgObj.image.key);
+      } else if (msgObj.file?.key) {
+        msgObj.file.url = await generateViewPresignedUrl(msgObj.file.key);
       }
       return msgObj;
     }));
